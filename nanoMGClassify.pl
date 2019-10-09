@@ -38,7 +38,7 @@ sub Info
 ## Dependencies: MENTION DEPENDENCIES POSSIBLY WITH VERSION
 ##
 ## Author: piyuranjan\@gmail.com
-## Source: https://github.com/piyuranjan/PerlScripts/blob/master/nanoMGClassify.pl
+## Source: https://github.com/piyuranjan/NanoMGClassify/blob/master/nanoMGClassify.pl
 ################################################################################
 	";
 	}
@@ -58,7 +58,11 @@ Arguments: required
                (minus trailing .X.cf).
 
 Options:
+ --bestHit   Force reporting of best hit from both Centrifuge and Blast.
+               Using this option disables LCA by design. Default: Off
  -f|force    Force overwrite outFile if it exists. Depends on -o|outFile.
+ --noTaxa    Do not use taxonomy information for faster classification.
+               Default: Off
  -o|outFile  <string> Send output to a file. STDOUT otherwise.
  -t|threads  <integer> Number of threads/processors to run. Default: 1
  --track     <integer> Track progress after every N sequences. Default: 50
@@ -101,7 +105,7 @@ Exit codes:
  0  Successful
  1  Unsuccessful or need arguments
  2  Problem with a dependency
- 3  Problem with a source FastQ file
+ 3  Problem with source FastQ file
  4  Problem with running Centrifuge
  5  Problem with running Blastn
  x  Maybe: Problem creating local copy of the fastq files
@@ -118,7 +122,7 @@ my $time0=time();
 ## Option reading and configuration ##
 
 ### Pre-process script specific arguments and defaults
-my($blIdx,$cfIdx,$threads,$trackAtSeq,$workDir);
+my($bestHit,$blIdx,$cfIdx,$noTaxa,$threads,$trackAtSeq,$workDir);
 $threads=1; #default thread/proc count is 1
 $trackAtSeq=50; #track progress at every 50 fastq records
 $workDir=realpath()."/NanoMGClassify"; #default work directory is PWD/NanoMGClassify (-yyyymmddhhmmss appended later) with full path resolved
@@ -130,8 +134,10 @@ $verbose=1; #set default verbose to 1
 ### Read-in arguments
 unless(GetOptions(
 				#script specific arguments
+				'bestHit' => \$bestHit,
 				'b|blIdx=s' => \$blIdx,
 				'c|cfIdx=s' => \$cfIdx,
+				'noTaxa' => \$noTaxa,
 				't|threads=i' => \$threads,
 				'track=i' => \$trackAtSeq,
 				'w|workDir=s' => \$workDir,
@@ -160,10 +166,14 @@ $workDir=$workDir."-".strftime("%Y%m%d%H%M%S",localtime(time)); #default work di
 $verbose=0 if($quiet);
 if($debug) #override verbosity to highest value for debugging code
 	{$verbose=100;warn TimeStamp($verbose)."INFO: Debug mode enabled. Setting verbosity to max.\n";}
+if(defined $bestHit)
+	{warn TimeStamp($verbose)."WARN: --bestHit is enabled! This is not recommended. Please make sure you know what it does by using -h|help.\n" if($verbose);}
+if(defined $noTaxa)
+	{warn TimeStamp($verbose)."WARN: --noTaxa is enabled! This is not recommended. Please make sure you know what it does by using -h|help.\n" if($verbose);}
 
 ### Time stats after option reading
 my $timeReadOptions=time();
-warn TimeStamp($verbose)."DBG: Time to read options: ".TimeDiffPretty($time0,$timeReadOptions)."\n" if($debug);
+warn TimeStamp($verbose)."DBG: STAT: Time to read options: ".TimeDiffPretty($time0,$timeReadOptions)."\n" if($debug);
 
 
 ## Check package dependencies ##
@@ -186,7 +196,7 @@ if(CheckBlast($verbose,$blastVersion)<1)
 
 ### Time stats after checking dependencies
 my $timeCheckDependency=time();
-warn TimeStamp($verbose)."DBG: Time to check dependencies: ".TimeDiffPretty($timeReadOptions,$timeCheckDependency)."\n" if($debug);
+warn TimeStamp($verbose)."DBG: STAT: Time to check dependencies: ".TimeDiffPretty($timeReadOptions,$timeCheckDependency)."\n" if($debug);
 
 
 ## Scan and prepare sequencing files for classification ##
@@ -217,7 +227,8 @@ foreach my $arg(@ARGV) #read all user arguments and scan all matching files
 	foreach(@files)
 		{if(/\.f(ast)?q(\.gz)?$/){chomp;push(@fqgzFiles,$_);}}
 	}
-warn TimeStamp($verbose)."STAT: Found ".scalar(@fqgzFiles)." file(s) to classify\n" if($verbose);
+warn TimeStamp($verbose)."STAT: Found ".scalar(@fqgzFiles)." file(s) to classify.\n" if($verbose);
+if(scalar(@fqgzFiles)<1){warn TimeStamp($verbose)."ERR: No files to classify. Exiting.\n";exit 3;} #exit if no files found
 if($verbose>1) #list all files found
 	{warn TimeStamp($verbose)."INFO: List of files:\n";warn "$_\n" foreach @fqgzFiles;}
 
@@ -244,7 +255,6 @@ foreach my $file(@fqgzFiles)
 	warn TimeStamp($verbose)."DBG: Command return status: \'$?\'\n" if($debug);
 	if($?!=0){warn TimeStamp($verbose)."ERR: Failed to create local fastq.\n";exit 1;}
 	push(@fqFiles,$newFile);
-	# warn TimeStamp($verbose)."INFO: Success\n" if($verbose>3);
 	}
 warn TimeStamp($verbose)."INFO: Succesfully created local fastq for ".scalar(@fqFiles)." file(s).\n" if($verbose>2);
 if($verbose>3) #list all local fastq created
@@ -252,7 +262,7 @@ if($verbose>3) #list all local fastq created
 
 ### Time stats after creating local fastq
 my $timeLocalFastq=time();
-warn TimeStamp($verbose)."DBG: Time to create local fastq: ".TimeDiffPretty($timeCheckDependency,$timeLocalFastq)."\n" if($debug);
+warn TimeStamp($verbose)."DBG: STAT: Time to create local fastq: ".TimeDiffPretty($timeCheckDependency,$timeLocalFastq)."\n" if($debug);
 
 
 ## Execute centrifuge and blast on each fastq ##
@@ -270,9 +280,8 @@ warn TimeStamp($verbose)."INFO: Succesfully created directory for Blast output: 
 my $fqFileCount=0;
 foreach my $fqFile(@fqFiles)
 	{
-	my $fqT0=time();
+	my $timeFastq0=time(); #start time working for current fastq
 	$fqFileCount++;
-	# warn TimeStamp($verbose)."INFO: Classifying sequences in fastq $fqFileCount: $fqFile\n" if($verbose>2);
 	warn TimeStamp($verbose)."INFO: Classifying sequences in fastq $fqFileCount: ".basename($fqFile)."\n" if($verbose>1);
 	
 	### Prepare centrifuge and blast output file names
@@ -284,86 +293,190 @@ foreach my $fqFile(@fqFiles)
 	my $cfClassify=$cfFileBase."_centrifugeClassify.txt"; #classification output fileName with full path
 	my $blMatches=File::Spec->catfile($blDir,$fileName."_blastMatches.txt"); #blast top hits fileName with full path
 	
-	### Execute centrifuge on the fastq and store output
+	### Construct centrifuge command
 	my $cfCmd="centrifuge -p $threads -x $cfIdx -U $fqFile --report-file $cfReport";
+	$cfCmd.=" -k 1" if(defined $bestHit); #engage reporting best hit if enabled.
+	
+	### Execute centrifuge with forking on the fastq
+	my($CMDRD,$CMDERR);
+	$CMDERR=gensym(); #create a symbol for error filehandle (FH); open3 doesn't do this automatically
 	warn TimeStamp($verbose)."INFO: Executing command:\n`$cfCmd`\n" if($verbose>2);
-	my @cfOut=`$cfCmd`;
+	my $cmdPid;
+	eval {$cmdPid=open3(undef,$CMDRD,$CMDERR,$cfCmd);}; #execute open3 in eval to capture errors
+	die "Couldn't fork centrifuge.\n$@" if($@); #throw out the error
+
+	### Start reading the centrifuge output
+	my ($cmdOut,$cmdErr)=('','');
+	my $cmdSelect=new IO::Select; #create a select object to notify read on FHs
+	$cmdSelect->add($CMDRD,$CMDERR); #add FHs
+	warn TimeStamp($verbose)."DBG: Reading from centrifuge:\n" if($debug);
+	while(my @ready=$cmdSelect->can_read) #find all FHs that are ready for reading
+		{
+		foreach my $fh(@ready) #loop through each FH that is ready
+			{
+			my $buffer;
+			my $size=sysread($fh,$buffer,4096); #read upto 4096 bytes in this iteration
+			unless(defined $size) #quit if error reading
+				{die "Error reading from Centrifuge child pid $cmdPid\n$!";}
+			elsif($size==0) #finish reading and remove if the FH is empty
+				{$cmdSelect->remove($fh);}
+			else #otherwise read data
+				{
+				warn TimeStamp($verbose)."DBG: Read $size bytes from $fh\n" if($debug);
+				if($fh==$CMDRD) #read output
+					{$cmdOut.=$buffer;}
+				elsif($fh==$CMDERR) #read error
+					{$cmdErr.=$buffer;}
+				else {die "ERR: Extra filehandle detected $fh\n";}
+				}
+			}
+		}
+	waitpid($cmdPid,0);
 	warn TimeStamp($verbose)."DBG: Command return status: \'$?\'\n" if($debug);
-	if($?!=0){warn TimeStamp($verbose)."ERR: Failed to run Centrifuge.\n";exit 4;}
-	warn TimeStamp($verbose)."INFO: Success\n" if($verbose>3);
-		
+	if($?!=0){warn TimeStamp($verbose)."ERR: Failed to run Centrifuge properly. Centrifuge said:\n---\n$cmdErr---\n";exit 4;}
+	
+	### Time stats after centrifuge execution
+	my $timeFastqCentrifuge=time();
+	warn TimeStamp($verbose)."DBG: STAT: Time to execute Centrifuge: ".TimeDiffPretty($timeFastq0,$timeFastqCentrifuge)."\n" if($debug);
+	
+	### Convert Centrifuge bulk output buffer in an array for better portability and destroy scalar
+	my @cfOut;
+	@cfOut=split(/\n/,$cmdOut); #breaking the buffer this way strips line endings; make sure to add them back while printing
+	undef $cmdOut; #destroy scalar to save memory
+
 	### Parse classification output to store assigned taxonomy ID(s)
-	open(my $CFOUT,">$cfClassify") or die $!; #open file to write the classification output as is
-	print $CFOUT shift(@cfOut); #remove header line and print to file
+	open(my $CFEXP,">$cfClassify") or die $!; #open file to write the classification output as is
+	print $CFEXP shift(@cfOut)."\n"; #remove header line and print to file
 	warn TimeStamp($verbose)."DBG: Number of classification records from Centrifuge: ".scalar(@cfOut)."\n" if($debug);
 	my %seqTaxa; #stores seqID->taxID1,taxID2,...
 	foreach (0..$#cfOut)
 		{
-		my $buffer=shift(@cfOut);
-		print $CFOUT $buffer; #print the classification output as it is on file
+		my $buffer=shift(@cfOut)."\n"; #add previously stripped new line with buffer read
+		print $CFEXP $buffer; #print the classification output as it is on file
 		my($seqID,undef,$taxID,undef,undef,undef,undef,undef)=split(/\t/,$buffer);
 		unless(defined($seqTaxa{$seqID})) #if taxID for a seqID is not established, assign the taxID
 			{$seqTaxa{$seqID}=$taxID;}
 		else #otherwise append the taxID with already existing taxID
 			{$seqTaxa{$seqID}.=",$taxID";}
 		}
-	close($CFOUT);
+	close($CFEXP);
 	warn TimeStamp($verbose)."DBG: Number of unique classification records from Centrifuge: ".scalar(%seqTaxa)."\n" if($debug);
+	
+	### Time stats after porting and parsing centrifuge output
+	my $timeFastqParse=time();
+	warn TimeStamp($verbose)."DBG: STAT: Time to parse Centrifuge output: ".TimeDiffPretty($timeFastqCentrifuge,$timeFastqParse)."\n" if($debug);
 	
 	### Prepare fasta file buffer from fastq and feed to blast with taxonomy
 	warn TimeStamp($verbose)."INFO: Starting to buffer fastq to fasta and feeding Blastn.\n" if($verbose>2);
-	tie my @fqReader, 'Tie::File', $fqFile, autochomp => 0, memory => 0, mode => O_RDONLY or die $!; #open fastq as an array
+	tie my @fqFileReader, 'Tie::File', $fqFile, autochomp => 0, memory => 0, mode => O_RDONLY or die $!; #open fastq as an array
 	open(my $BLOUT,">$blMatches") or die $!; #open file to write blast top hits output as is
-	my $fqMax=$#fqReader; #store max lines to avoid recaching
-	my $fqCount=0;
+	my @blCols=qw(qaccver saccver staxid pident length mismatch gapopen qstart qend sstart send evalue bitscore); #this will be the order of columns in blast output
+	print $BLOUT "#".join("\t#",@blCols)."\n"; #print column headers to blast files
+	my $fqMaxLines=$#fqFileReader; #store max lines to avoid recaching
+	my $fqCountTotal=($fqMaxLines+1)/4;
+	my $fqCount=0; my $fqFailed=0;
+	my $fqUsedTaxa=0;
 	my $fqLine=0;
-	while($fqLine<=$fqMax)
+	while($fqLine<=$fqMaxLines)
 		{
 		### Prepare fasta buffer
-		my ($seqID)=$fqReader[$fqLine]=~/^@(.*?)\s/; #isolate seqID
+		my ($seqID)=$fqFileReader[$fqLine]=~/^@(.*?)\s/; #isolate seqID
 		unless($seqID) #check for fastq format problems
 			{warn TimeStamp($verbose)."ERR: Format corruption. Files are probaly not fastq format.\n";exit 3;}
-		my $faBuffer=">$seqID\n".$fqReader[$fqLine+1]; #read sequence and store as fasta buffer
+		my $faBuffer=">$seqID\n".$fqFileReader[$fqLine+1]; #read sequence and store as fasta buffer
 		$fqLine+=4; #advance line count to next fastq record
-		# warn TimeStamp($verbose)."DBG: Fasta buffer:\n$faBuffer\n" if($debug); #uncomment to see how sequences are being parsed
+		# warn TimeStamp($verbose)."DBG: Fasta buffer:\n---\n$faBuffer\n---\n" if($debug); #uncomment to see how sequences are being parsed
 		
-		### Construct blastn command
-		my $blCmd="blastn -db $blIdx -evalue 0.01 -num_threads 1 -outfmt \"6 qaccver saccver staxid pident length mismatch gapopen qstart qend sstart send evalue bitscore\"";
-		$blCmd.=" -taxids $seqTaxa{$seqID}" if($seqTaxa{$seqID}); #appends taxonomy data for blastn search if the taxa ID is non-zero
+		### Construct blastn command based on taxonomy ID from Centrifuge
+		my $blCmd="blastn -db $blIdx -evalue 0.01 -num_threads 1 -outfmt \"6 @blCols\"";
+		if($seqTaxa{$seqID} && !defined($noTaxa)) #append taxonomy data for blastn search if the taxa ID is non-zero and is not disabled
+			{$blCmd.=" -taxids $seqTaxa{$seqID}";$fqUsedTaxa++;}
+		$blCmd.=" -max_target_seqs 1" if(defined $bestHit); #engage reporting best hit if enabled.
 		
-		### Execute blastn command and parse output
-		my($blWriter,$blReader,$blErr);
-		warn TimeStamp($verbose)."DBG: Executing command:\n`$blCmd`\n" if($debug); #uncomment to see blast command for each sequence
-		my $blPid=open3($blWriter,$blReader,$blErr,$blCmd) or die "Couldn't fork blastn: $!";
-		print $blWriter $faBuffer; #feed in the sequence to blastn
-		close($blWriter); #finish feeding the sequence
-		###################################### needs work!
-		###error handler for blast.
-		while(<$blReader>) #export blast output
-			{print $BLOUT $_;}
-		waitpid($blPid,0); #wait in perl parent until blastn child closes; reduces possibility of a zombie process
-		warn TimeStamp($verbose)."DBG: Command return status: \'$?\'\n" if($debug);
-		if($?!=0){warn TimeStamp($verbose)."ERR: Failed to run Blast.\n";exit 5;}
-		# warn TimeStamp($verbose)."DBG: Success\n" if($debug);
+		### Execute blast with forking and feed the fasta buffer
+		my($CMDWT,$CMDRD,$CMDERR);
+		$CMDERR=gensym(); #create a symbol for error filehandle (FH); open3 doesn't do this automatically
+		warn TimeStamp($verbose)."DBG: Executing command: `$blCmd`\n" if($debug); #uncomment to see blast command for each fasta record buffered
+		my $cmdPid;
+		eval {$cmdPid=open3($CMDWT,$CMDRD,$CMDERR,$blCmd);}; #execute open3 in eval to capture errors
+		die "Couldn't fork blast.\n$@" if($@); #throw out the error
+		print $CMDWT $faBuffer; #feed in the sequence to blastn
+		close($CMDWT); #finish feeding the sequence
 		
-		$fqCount++; #count successful fastq record executions.
+		### Start reading the blast output
+		my ($cmdOut,$cmdErr)=('','');
+		my $cmdSelect=new IO::Select; #create a select object to notify read on FHs
+		$cmdSelect->add($CMDRD,$CMDERR); #add FHs
+		warn TimeStamp($verbose)."DBG: Reading from blastn:\n" if($debug);
+		while(my @ready=$cmdSelect->can_read) #find all FHs that are ready for reading
+			{
+			foreach my $fh(@ready) #loop through each FH that is ready
+				{
+				my $buffer;
+				my $size=sysread($fh,$buffer,4096); #read upto 4096 bytes in this iteration
+				unless(defined $size) #quit if error reading
+					{die "ERR: Error reading from Blast child pid $cmdPid\n$!";}
+				elsif($size==0) #finish reading and remove if the FH is empty
+					{$cmdSelect->remove($fh);}
+				else #otherwise read data
+					{
+					warn TimeStamp($verbose)."DBG: Read $size bytes from $fh\n" if($debug);
+					if($fh==$CMDRD) #read output
+						{$cmdOut.=$buffer;}
+					elsif($fh==$CMDERR) #read error
+						{$cmdErr.=$buffer;}
+					else {die "ERR: Extra filehandle detected $fh\n";}
+					}
+				}
+			}
+		waitpid($cmdPid,0);
+		warn TimeStamp($verbose)."DBG: Command return status: \'$?\'\n" if($debug); #uncomment to see blast command exit status for each fasta record buffered
+		if($?!=0) #if exit code non-zero, print error
+			{
+			warn TimeStamp($verbose)."WARN: Failed to run Blast properly on $seqID from fastq $fqFileCount!\n" if($verbose);
+			warn TimeStamp($verbose)."WARN: INFO: Blast command used was: `$blCmd`\n" if($verbose>1);
+			warn TimeStamp($verbose)."WARN: Blast said:\n---\n$cmdErr---\n" if($verbose);
+			$fqFailed++; #count failed/unsuccessful executions.
+			$fqUsedTaxa-- if($seqTaxa{$seqID} && !defined($noTaxa)); #undo count of fastq using taxa if they did
+			# exit 5; #uncomment if termination is desired on Blast fail
+			}
+		else #otherwise, parse output from command
+			{print $BLOUT $cmdOut;}
+		
+		$fqCount++; #count fastq record executions.
 		
 		### Status of fastq progress
-		unless($fqCount%$trackAtSeq)
-			{warn TimeStamp($verbose)."INFO: Sequences classified from fastq $fqFileCount: $fqCount \n" if($verbose>1);}
+		unless($fqCount % $trackAtSeq)
+			{warn TimeStamp($verbose)."STAT: Sequences classified from fastq $fqFileCount: $fqCount of $fqCountTotal \n" if($verbose);}
 		}
 	close($BLOUT);
-	untie @fqReader; #close fastq filehandle
+	untie @fqFileReader; #close fastq filehandle
 	
-	warn TimeStamp($verbose)."STAT: Finished sequence classification in ".TimeDiffPretty($fqT0)." from fastq $fqFileCount.\n" if($verbose);
+	### Stats after all blast executions for the current fastq
+	my $timeFastqBlast=time();
+	warn TimeStamp($verbose)."DBG: STAT: Time to Blast $fqCount of $fqCountTotal sequences in fastq $fqFileCount: ".TimeDiffPretty($timeFastqParse,$timeFastqBlast)."\n" if($debug); #time stats
+	if($verbose && $fqFailed) #failed stats
+		{
+		warn TimeStamp($verbose)."WARN: $fqFailed of $fqCountTotal sequences FAILED in Blast for fastq $fqFileCount! : ".basename($fqFile)."\n";
+		warn TimeStamp($verbose)."WARN: Please check the log above for messages from Blast.\n";
+		}
+	warn TimeStamp($verbose)."STAT: $fqUsedTaxa of $fqCountTotal sequences in fastq $fqFileCount used taxonomy.\n" if($verbose); #taxonomy stats
+	
+	### Prepare Krona report from Blast results
+	
+	
+	### Time stats after all steps for current fastq
+	my $timeFastqAll=time();
+	# warn TimeStamp($verbose)."STAT: Finished sequence classification in ".TimeDiffPretty($timeFastq0,$timeFastqAll)." from fastq $fqFileCount.\n" if($verbose);
+	warn TimeStamp($verbose)."STAT: Time to finish sequence classification from fastq $fqFileCount: ".TimeDiffPretty($timeFastq0,$timeFastqAll)."\n" if($verbose);
 	}
 
 
-
 ## Print stats of operation ##
-# my $diffTime=Time::Seconds->new(int((time()-$time0)+0.5));
-# my $spentTime=$diffTime->pretty;
-warn TimeStamp($verbose)."STAT: Finished everything in ".TimeDiffPretty($time0)."\n" if($verbose);
+
+### Time stats after everything
+my $timeEnd=time();
+warn TimeStamp($verbose)."STAT: Time to finish classification for ".scalar(@fqFiles)." fastq file(s): ".TimeDiffPretty($time0,$timeEnd)."\n" if($verbose);
 
 
 #########################
@@ -545,10 +658,12 @@ sub PrintHeader #Prints \t spaced header column names to STDOUT (or a fileHandle
 	die "ERR: No column names provided.\n$!" unless(@colNames);
 	my $FH=$_[1];
 	
+	my $header="#".join("\t#",@colNames)."\n";
+	
 	if(defined $FH) #print to filehandle if provided
-		{print $FH "#$_\t" foreach @colNames;say "";}
+		{print $FH $header;}
 	else #default to STDOUT
-		{print "#$_\t" foreach @colNames;say "";}
+		{print $header;}
 	}
 
 sub TimeDiffPretty #Provides difference in timepoints in a pretty format
