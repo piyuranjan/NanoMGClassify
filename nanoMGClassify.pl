@@ -5,6 +5,7 @@ use Fcntl 'O_RDONLY'; #https://perldoc.perl.org/Fcntl.html load the C Fcntl.h de
 use File::Basename; #https://perldoc.perl.org/File/Basename.html Parse file paths into directory, filename and suffix.
 use File::Spec; #https://perldoc.perl.org/File/Spec.html portably perform operations on file names and paths; more extensive than File::Basename
 use Getopt::Long; #https://perldoc.perl.org/Getopt/Long.html Extended processing of command line options
+# use Getopt::Long qw(:config no_ignore_case bundling); #https://perldoc.perl.org/Getopt/Long.html Extended processing of command line options
 use IO::Select; #https://perldoc.perl.org/IO/Select.html OO interface to the select system call; allows the user to see what IO handles, are ready for reading, writing or have an exception pending
 use IPC::Open3; #https://perldoc.perl.org/IPC/Open3.html open a process for reading, writing, and error handling using open3()
 use POSIX qw(strftime); #https://perldoc.perl.org/POSIX.html Perl interface to IEEE Std 1003.1
@@ -19,6 +20,13 @@ use warnings; #https://perldoc.perl.org/warnings.html Perl pragma to control opt
 
 use diagnostics; #https://perldoc.perl.org/diagnostics.html produce verbose warning diagnostics; at least during development
 
+
+## Program-wide defaults ##
+our $version='0.0.3';
+my $l1Package="Centrifuge"; #default level-1 classification program
+my $l2Package="Blast"; #default level-2 classification program
+
+
 #########################
 ######### Usage #########
 #########################
@@ -27,8 +35,8 @@ sub Info
 	{
 	say "
 ################################################################################
-## nanoMGClassify.pl
-## Accurate metagenomic classification of long-read Nanopore DNA sequences using
+## nanoMGClassify.pl version $version
+## Metagenomic classification of long-read Nanopore DNA sequences using
 ## ensemble methods.
 ##
 ## Input: FILL INPUT DETAILS
@@ -52,33 +60,36 @@ At least one of the following is required
  fastqFile1..n  Specify files as positional arguments.
 
 Arguments: required
- -b|blIdx    <string> Path to Blast database with index prefix
-               (minus trailing .nXX).
- -c|cfIdx    <string> Path to Centrifuge database with index prefix
-               (minus trailing .X.cf).
+ -1|l1Idx    <string> Path to $l1Package (level-1 classification) database
+               with index prefix (for example, minus trailing .X.cf)
+ -2|l2Idx    <string> Path to $l2Package (level-2 classification) database
+               with index prefix (for example, minus trailing .nXX)
 
 Options:
- --bestHit   Force reporting of best hit from both Centrifuge and Blast.
+ --bestHit   Force reporting of best hit from both $l1Package and $l2Package.
                Using this option disables LCA by design. Default: Off
- -f|force    Force overwrite outFile if it exists. Depends on -o|outFile.
- --noTaxa    Do not use taxonomy information for faster classification.
+ --noTaxa    Do not use taxonomy information between levels (not recommended).
+               Using this option disables taxonomy accelerated classification.
                Default: Off
  -o|outFile  <string> Send output to a file. STDOUT otherwise.
- -t|threads  <integer> Number of threads/processors to run. Default: 1
- --track     <integer> Track progress after every N sequences. Default: 50
- -h|help     Show more help and exit 0.
- -v|verbose  Use multiple times to increase verbosity.
+ -t|threads  <integer> Number of threads or processes to run. Default: 1
+ --trackAt   <integer> Track progress after every N sequences. Default: 50
+
+Generic Options:
  -q|quiet    Silent execution except for significant/fatal errors (ERR).
                No warnings (WARN), statistics (STAT) and information (INFO)
                when -q engaged. Make sure you know what you're doing.
+ -v|verbose  Use multiple times to increase verbosity.
  --debug     Set max verbosity for debugging.
+ --version   Show program version and exit 0.
+ -h|help     Show more help and exit 0.
 	";
 	}
 sub Examples
 	{
 	say "
 Examples:
-
+### The following is under development ###
 ### Newbie: HOW TO USE FOR A NEW PERSON.
 $0 *.fastq.gz
 
@@ -106,10 +117,14 @@ Exit codes:
  1  Unsuccessful or need arguments
  2  Problem with a dependency
  3  Problem with source FastQ file
- 4  Problem with running Centrifuge
- 5  Problem with running Blastn
+ 4  Problem with running $l1Package
+ 5  Problem with running $l2Package
  x  Maybe: Problem creating local copy of the fastq files
 	";
+	}
+sub ShowVersion
+	{
+	say "$0 $version";
 	}
 
 
@@ -119,24 +134,25 @@ Exit codes:
 
 my $time0=time();
 
+
 ## Option reading and configuration ##
 
 ### Pre-process script specific arguments and defaults
-my($bestHit,$blIdx,$cfIdx,$noTaxa,$threads,$trackAtSeq,$workDir);
+my($bestHit,$l1Idx,$l2Idx,$noTaxa,$threads,$trackAtSeq,$workDir);
 $threads=1; #default thread/proc count is 1
 $trackAtSeq=50; #track progress at every 50 fastq records
 $workDir=realpath()."/NanoMGClassify"; #default work directory is PWD/NanoMGClassify (-yyyymmddhhmmss appended later) with full path resolved
 
 ### Pre-process generic arguments and defaults
-my($debug,$quiet,$help,$verbose); #generic arguments
+my($debug,$quiet,$help,$verbose,$versionCheck); #generic arguments
 $verbose=1; #set default verbose to 1
 
 ### Read-in arguments
 unless(GetOptions(
 				#script specific arguments
+				'1|l1Idx=s' => \$l1Idx,
+				'2|l2Idx=s' => \$l2Idx,
 				'bestHit' => \$bestHit,
-				'b|blIdx=s' => \$blIdx,
-				'c|cfIdx=s' => \$cfIdx,
 				'noTaxa' => \$noTaxa,
 				't|threads=i' => \$threads,
 				'track=i' => \$trackAtSeq,
@@ -146,18 +162,21 @@ unless(GetOptions(
 				'q|quiet' => \$quiet,
 				'h|help' => \$help,
 				'v|verbose+' => \$verbose,
+				'version' => \$versionCheck,
 				))
 	{Usage;exit 1;} #quit with error code
 if($help) #quit with full help
 	{Info;Usage;Examples;StatusInfo;exit 0;}
+if($versionCheck) #quit with version information
+	{ShowVersion;exit 0;}
 
 ### Set necessary arguments
 unless(defined $ARGV[0])
 	{warn TimeStamp($verbose)."ERR: Need fastq files or file pattern.\n";Usage;exit 1;}
-unless(defined $blIdx)
-	{warn TimeStamp($verbose)."ERR: Need Blast index path.\n";Usage;exit 1;}
-unless(defined $cfIdx)
-	{warn TimeStamp($verbose)."ERR: Need Centrifuge index path.\n";Usage;exit 1;}
+unless(defined $l1Idx)
+	{warn TimeStamp($verbose)."ERR: Need $l1Package index path.\n";Usage;exit 1;}
+unless(defined $l2Idx)
+	{warn TimeStamp($verbose)."ERR: Need $l2Package index path.\n";Usage;exit 1;}
 
 ### Post-process option behaviors, arguments and defaults
 chomp($workDir);
@@ -209,8 +228,8 @@ unless($workDirExists)
 else
 	{
 	warn TimeStamp($verbose)."ERR: Work directory already exists, $workDir\n";
-	warn TimeStamp($verbose)."DBG: Directory code: \'$workDirExists\'\n" if($debug);
-	exit 0;
+	warn TimeStamp($verbose)."DBG: Directory code from IsValidDirectory: \'$workDirExists\'\n" if($debug);
+	exit 1;
 	}
 $workDir=realpath($workDir); #resolve full path for work dir if prefix provided by user
 warn TimeStamp($verbose)."INFO: Work directory established: $workDir\n" if($verbose>2);
@@ -265,20 +284,16 @@ my $timeLocalFastq=time();
 warn TimeStamp($verbose)."DBG: STAT: Time to create local fastq: ".TimeDiffPretty($timeCheckDependency,$timeLocalFastq)."\n" if($debug);
 
 
-## Execute centrifuge and blast on each fastq ##
+## Execute level-1 and level-2 classification on each fastq ##
 
-######## add package name variables and modify statements accordingly.
-
-### Prepare work directories for centrifuge and blast
-warn TimeStamp($verbose)."STEP: Starting to run Centrifuge and BLAST on each fastq.\n" if($verbose);
-# my $cfDir=$workDir."/01.CentrifugeClassification"; #this directory will hold all centrifuge outputs
-my $l1Dir=$workDir."/01.CentrifugeClassification"; #this directory will hold all centrifuge outputs
+### Prepare work directories for L1 and L2 packages
+warn TimeStamp($verbose)."STEP: Starting to run $l1Package and $l2Package on each fastq.\n" if($verbose);
+my $l1Dir=$workDir."/01.".$l1Package."Classification"; #this directory will hold all level-1 outputs
 mkdir $l1Dir or die $!;
-warn TimeStamp($verbose)."INFO: Succesfully created directory for Centrifuge output: $l1Dir \n" if($verbose>2);
-# my $blDir=$workDir."/02.BlastClassification"; #this directory will hold all blast outputs
-my $l2Dir=$workDir."/02.BlastClassification"; #this directory will hold all blast outputs
+warn TimeStamp($verbose)."INFO: Succesfully created directory for $l1Package output: $l1Dir \n" if($verbose>2);
+my $l2Dir=$workDir."/02.".$l2Package."Classification"; #this directory will hold all level-2 outputs
 mkdir $l2Dir or die $!;
-warn TimeStamp($verbose)."INFO: Succesfully created directory for Blast output: $l2Dir \n" if($verbose>2);
+warn TimeStamp($verbose)."INFO: Succesfully created directory for $l2Package output: $l2Dir \n" if($verbose>2);
 
 ### Cycle on each fastq for classification
 my $fqFileCount=0;
@@ -289,24 +304,23 @@ foreach my $fqFile(@fqFiles)
 	warn TimeStamp($verbose)."INFO: Classifying sequences in fastq $fqFileCount: ".basename($fqFile)."\n" if($verbose>1);
 	
 	### Run Level-1 classification with the fqFile
-	my $l1Idx=$cfIdx; #change this statement before this level to make l1Idx standard terminology
 	my %seqTaxaL1;
 	my $l1FqCount=ExecCentrifuge($fqFileCount,$fqFile,\%seqTaxaL1,$l1Dir,$threads,$l1Idx,$bestHit,$verbose); #use Centrifuge for L1 classification
 	
 	### Time stats after forking and parsing L1 output
 	my $timeExecL1=time();
-	warn TimeStamp($verbose)."INFO: STAT: Time to process $l1FqCount sequences at level-1 with Centrifuge: ".TimeDiffPretty($timeFastq0,$timeExecL1)."\n" if($verbose>2);
+	warn TimeStamp($verbose)."INFO: STAT: Time to process $l1FqCount sequences at level-1 with $l1Package: ".TimeDiffPretty($timeFastq0,$timeExecL1)."\n" if($verbose>2);
 	
 	### Run Level-2 classification with the fqFile
-	my $l2Idx=$blIdx; #change this statement before this level to make l2Idx standard terminology
 	my $l2FqCount=ExecBlast($fqFileCount,$fqFile,\%seqTaxaL1,$l2Dir,$threads,$l2Idx,$noTaxa,$bestHit,$trackAtSeq,$verbose); #use Blast for L2 classification
 	
 	### Time stats after forking and parsing L2 output
 	my $timeExecL2=time();
-	warn TimeStamp($verbose)."INFO: STAT: Time to process $l2FqCount sequences at level-2 with Blast: ".TimeDiffPretty($timeExecL1,$timeExecL2)."\n" if($verbose>2);
+	warn TimeStamp($verbose)."INFO: STAT: Time to process $l2FqCount sequences at level-2 with $l2Package: ".TimeDiffPretty($timeExecL1,$timeExecL2)."\n" if($verbose>2);
 	
-	### Prepare Krona report from Blast results
+	### Prepare Krona report from level-2 results
 	
+	################### Pick up work here #####################
 	
 	### Time stats after all steps for current fastq
 	my $timeFastqAll=time();
@@ -563,7 +577,9 @@ sub ExecBlast #Executes blastn (bl) with parameters and returns parsed sequence 
 			# exit 5; #uncomment if termination is desired on Blast fail
 			}
 		else #otherwise, parse output from command
-			{}
+			{
+			################### Pick up work here #####################
+			}
 		
 		### Time stats after parsing package output
 		my $timeCmdParse=time();
@@ -593,7 +609,6 @@ sub ExecCentrifuge #Executes centrifuge (cf) with parameters and returns parsed 
 	{
 	### Order of Input: fqFileCount-req, fqFile-req, \%seqIDTaxID-req (a hash ref to store seqID:taxa->taxID1,taxID2,... and seqID->taxID->refID1,... mappings), cfWorkDir-req, threads-opt, cfIndexPath-req, bestHitAlgoFlag-opt, verboseLevel-opt
 	### Order of Output: uniqueFqRecordsProcessedCount-opt
-	### Order of Output: \%seqMatches-req (a reference to seqID:taxa->taxID1,taxID2,... and seqID->taxID->refID1,... mappings)
 	my $timeSub0=time();
 	my $packageName="Centrifuge";
 	my ($fqFileCount,$fqFile,$seqTaxaRef,$cmdWorkDir,$threads,$idxPath,$bestHit,$verbose,@rest)=@_;
